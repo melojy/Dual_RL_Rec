@@ -8,7 +8,7 @@ This is the repository for the paper: **"Bridging the Domain Gap: POI Recommenda
 Here we provide the overall intuition and performance comparison of our proposed method.
 
 <p align="center">
-  <img src="results/visualization/Introduction.png" alt="Introduction" width="50%">
+  <img src="results/visualization/Introduction.png" alt="Introduction" width="70%">
 </p>
 
 ---
@@ -16,7 +16,7 @@ Here we provide the overall intuition and performance comparison of our proposed
 ## ⚙️ 2. Methodology & Framework
 
 <p align="center">
-  <img src="results/visualization/FrameWork.png" alt="Framework" width="60%">
+  <img src="results/visualization/FrameWork.png" alt="Framework" width="70%">
 </p>
 
 ---
