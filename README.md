@@ -4,7 +4,7 @@ This is the repository for the paper: **"Bridging the Domain Gap: POI Recommenda
 
 ---
 
-## 📌 1. Introduction
+## 1. Introduction
 Here we provide the overall intuition and performance comparison of our proposed method.
 
 <p align="center">
@@ -13,7 +13,7 @@ Here we provide the overall intuition and performance comparison of our proposed
 
 ---
 
-## ⚙️ 2. Methodology & Framework
+## 2. Methodology & Framework
 
 <p align="center">
   <img src="results/visualization/FrameWork.png" alt="Framework" width="70%">
@@ -21,7 +21,7 @@ Here we provide the overall intuition and performance comparison of our proposed
 
 ---
 
-## 📝 3. User Profiling Prompts
+## 3. User Profiling Prompts
 As specified in the paper, we leverage Large Language Models (LLMs) to perform semantic data augmentation and extract fine-grained user profiles from review data. 
 
 Below is the complete **System Prompt** and **User Prompt** structure used for user preference extraction:
@@ -44,3 +44,29 @@ Below is the complete **System Prompt** and **User Prompt** structure used for u
 
 ### User Prompt
    user_prompt = f"User Records: \n{compressed_text}"
+
+
+
+## 4. Other Implementation Details
+
+### Model Architecture
+* **Feature Extraction Module:** Adopts a 4-layer Transformer encoder structure. The multi-head attention mechanism consists of 8 attention heads. 
+* **Reinforcement Learning (RL) Agent:** Both the Actor and Critic networks adopt a multi-layer perceptron (MLP) architecture. The input dimension is 384 (formed by concatenating the positive prototype, negative prototype, and historical trajectory mean). The Actor network outputs a 128-dimensional continuous residual vector, while the Critic network outputs a scalar state value.
+* **Semantic Parsing:** Utilizes the **DeepSeek-V3** large language model. The sampling temperature is strictly set to 0.1 to ensure the determinism and consistency of entity-attribute extraction.
+
+### Hyperparameters & Training Settings
+The joint training process ensures each user is updated at least once, with the agent performing a maximum of $T=20$ exploration steps per epoch. 
+
+| Component / Parameter | Setting / Value |
+| :--- | :--- |
+| **Transformer Encoder** | Embedding dim $d=128$, Max seq length $J=60$ |
+| **Encoder Regularization** | GELU activation, Dropout rate = 0.2 |
+| **Max Training Epochs** | 6000 (Yelp), 24000 (Google Local) |
+| **Optimizers** | AdamW (Encoder: lr=$10^{-5}$)<br>Adam (Actor: lr=$10^{-4}$, Critic: lr=$3 \times 10^{-4}$) |
+| **PPO Algorithm** | Discount factor $\gamma=0.99$<br>GAE smoothing $\lambda=0.95$<br>Clipping threshold $\varepsilon=0.2$<br>Update iterations $F=4$ |
+
+### Zero-Shot Cross-Domain Evaluation
+In this stage, the parameters of both the underlying semantic encoder and the Actor network are **frozen**. 
+1.  **Offline Processing:** The system first performs a one-time offline processing of the candidate POI metadata and the target user's global profile in the target domain. 
+2.  **Inference:** The Actor network receives the initial state of the target domain and completes action output solely through lightweight forward propagation and matrix inner-product operations. 
+3.  **Recommendation Standard:** We adopt the Top-K standard, selecting the top-$k$ uninteracted entities with the highest scores from the environment candidate set.
