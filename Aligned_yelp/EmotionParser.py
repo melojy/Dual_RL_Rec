@@ -2,22 +2,20 @@ import json
 import time
 from openai import OpenAI
 
-# ================= 配置区 =================
-DEEPSEEK_API_KEY = "sk-3d03fb0db4a94d92948ac373ac172690"  # 替换为你的真实 API Key
+# ================= SETTING =================
+DEEPSEEK_API_KEY = "API KEY"  # true API Key
 BASE_URL = "https://api.deepseek.com"
 
-INPUT_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\rl_cross_domain_data.jsonl"
-OUTPUT_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\llm_extracted_preferences.jsonl"
-POI_META_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\rl_poi_metadata.json"
+INPUT_FILE = r"DUAL_RL_REC/data/yelp/cross_domain_data.jsonl"
+OUTPUT_FILE = r""
+POI_META_FILE = r"DUAL_RL_REC/data/yelp/POI_mata_data.json"
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=BASE_URL)
 
-# 提前加载 POI 元数据，辅助大模型进行 Schema 对齐
 with open(POI_META_FILE, 'r', encoding='utf-8') as f:
     poi_metadata = json.load(f)
 
 def build_prompt(records):
-    """构建极致压缩、强制对齐 Schema 且要求细粒度分类的 Prompt"""
     
     simplified_records = []
     for r in records:
@@ -31,39 +29,39 @@ def build_prompt(records):
             "poi_attributes": meta.get("attributes", {})
         })
     
-    system_prompt = """你是一个专业的推荐系统数据分析专家。
-请阅读用户对多个地点的评价及其对应的地点元数据，并总结出该用户的【全局兴趣画像】以及对【每个地点的真实情绪得分】。
-请严格输出以下 JSON 结构：
+    system_prompt = """You are a professional recommendation system data analysis expert.
+Please read the user's reviews of multiple places and their corresponding place metadata, and summarize the user's 【Global Interest Profile】 as well as the 【Real Sentiment Score for Each Place】.
+You must strictly output the following JSON structure:
 {
   "global_liked": {
-    "categories": ["Sushi Bars", "Boutique Hotels"], // 提取用户喜欢的具体细分领域
-    "attributes": {"WiFi": "u'free'", "OutdoorSeating": "True"} // 严格使用元数据中的属性键值对格式
+    "categories": ["Sushi Bars", "Boutique Hotels"], // Extract the specific subcategories the user likes
+    "attributes": {"WiFi": "u'free'", "OutdoorSeating": "True"} // Strictly use the attribute key-value pair format from the metadata
   },
   "global_disliked": {
-    "categories": ["Fast Food", "Dive Bars"], // 提取用户厌恶的具体细分领域
-    "attributes": {"RestaurantsPriceRange2": "4", "NoiseLevel": "u'loud'"} // 厌恶的属性特点
+    "categories": ["Fast Food", "Dive Bars"], // Extract the specific subcategories the user dislikes
+    "attributes": {"RestaurantsPriceRange2": "4", "NoiseLevel": "u'loud'"} // Disliked attribute characteristics
   },
   "poi_scores": {
-    "地点poi_id": 4.5 // 根据评论真实情绪给出的 1.0~5.0 评分
+    "place_poi_id": 4.5 // A 1.0~5.0 rating based on the real sentiment expressed in the reviews
   }
 }
 
-【极其重要的分类（Categories）提取规则】：
-绝对禁止使用过于宽泛的顶层类别（如 "Restaurants", "Food", "Hotels", "Shopping", "Nightlife" 等无意义的泛词）。
-你必须从原始文本或元数据中，提取或总结出具体、细粒度的子类别！
-例如：用 "Family-style Restaurant" 代替 "Restaurants"；用 "Japanese Sushi" 代替 "Food"；用 "Luxury Boutique Hotel" 代替 "Hotels"。
+【Extremely Important Category Extraction Rules】:
+It is absolutely forbidden to use overly broad top-level categories (such as meaningless general terms like "Restaurants", "Food", "Hotels", "Shopping", "Nightlife").
+You MUST extract or summarize specific, fine-grained subcategories from the original text or metadata!
+For example: use "Family-style Restaurant" instead of "Restaurants"; use "Japanese Sushi" instead of "Food"; use "Luxury Boutique Hotel" instead of "Hotels".
 
-要求：
-1. global_liked 和 global_disliked 必须是对该用户所有评论的全局大总结。
-2. categories 必须遵守上述的细粒度规则，attributes 必须尽量与输入的地点元数据格式保持一致。
-3. 直接输出合法 JSON，不要 Markdown 标记。"""
+Requirements:
+1. global_liked and global_disliked must be an overall global summary based on all of the user's reviews.
+2. categories must strictly adhere to the fine-grained rule above, and attributes should match the format of the input place metadata as closely as possible.
+3. Output valid JSON directly, without Markdown formatting."""
 
-    user_prompt = f"这是该用户的打卡记录及 POI 元数据：\n{json.dumps(simplified_records, ensure_ascii=False)}"
+    user_prompt = f"This is the user's check-in records and POI metadata:\n{json.dumps(simplified_records, ensure_ascii=False)}"
     
     return system_prompt, user_prompt
 
 def process_user_records(user_data):
-    # 将源域和目标域的记录一起喂给模型，提取全局画像
+
     all_records = user_data.get("source_records", []) + user_data.get("target_records", [])
     if not all_records:
         return None
@@ -83,7 +81,7 @@ def process_user_records(user_data):
             )
             
             result_text = response.choices[0].message.content.strip()
-            # 清洗 markdown 符号
+
             if result_text.startswith("```json"):
                 result_text = result_text[7:-3].strip()
             elif result_text.startswith("```"):
@@ -91,7 +89,6 @@ def process_user_records(user_data):
                 
             parsed_json = json.loads(result_text)
             
-            # 【核心修改】：只组装你要求的极简 JSON 格式，挂载 user_id
             final_user_profile = {
                 "user_id": user_data["user_id"],
                 "global_liked": parsed_json.get("global_liked", {"categories": [], "attributes": {}}),
@@ -108,24 +105,24 @@ def process_user_records(user_data):
     return None
 
 def main():
-    print(f"🚀 开始使用 DeepSeek 提取用户极致纯净双极画像...")
+    print(f"Start to extract the user's Global Interest Profile...")
     processed_count = 0
     with open(INPUT_FILE, 'r', encoding='utf-8') as fin, open(OUTPUT_FILE, 'w', encoding='utf-8') as fout:
         lines = fin.readlines() 
         for i, line in enumerate(lines):
             user_data = json.loads(line)
-            print(f"[{i+1}/{len(lines)}] 正在提取用户: {user_data['user_id']} ...")
+            print(f"[{i+1}/{len(lines)}] Extracting user: {user_data['user_id']} ...")
             
             final_profile = process_user_records(user_data)
             
             if final_profile:
-                # 严格按行输出 JSONL 格式
+
                 fout.write(json.dumps(final_profile, ensure_ascii=False) + '\n')
                 processed_count += 1
                 
-            time.sleep(0.5) # 防止 API 并发超限
+            time.sleep(0.5)
 
-    print(f"\n✅ 处理完成！已成功提取并保存至: {OUTPUT_FILE}")
+    print(f"Successfully extracted and saved to: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()

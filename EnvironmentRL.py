@@ -3,7 +3,6 @@ import torch.nn.functional as F
 import math
 from collections import Counter
 
-#强化学习环境
 class EnhancedTravelPlanningEnv:
     def __init__(self, config, encoder, candidates_dict, poi_meta, llm_profiles):
         self.config = config
@@ -52,7 +51,7 @@ class EnhancedTravelPlanningEnv:
         poi_tokens = []
         for pid in self.candidate_ids:
             meta = self.poi_meta.get(pid, {})
-            # 【修复脏数据】：安全获取 attributes，防止 null 导致的 NoneType 报错
+
             cats = meta.get('categories') or "Unknown"
             raw_attrs = meta.get('attributes')
             attrs = " ".join(raw_attrs.keys()) if isinstance(raw_attrs, dict) else "None"
@@ -65,7 +64,6 @@ class EnhancedTravelPlanningEnv:
         
         profile = self.llm_profiles[user_id]
         
-        # 【同理修复】：安全处理画像中的 attributes 脏数据
         like_cat_text = " ".join(profile['global_liked'].get('categories') or []) or "None"
         like_raw_attrs = profile['global_liked'].get('attributes')
         like_attr_text = " ".join(like_raw_attrs.keys()) if isinstance(like_raw_attrs, dict) else "None"
@@ -84,7 +82,7 @@ class EnhancedTravelPlanningEnv:
         return self._get_state()
 
     def _get_state(self):
-        # 即使去掉了连续性惩罚，记录历史走过的均值 h_t 依然有助于 Agent 知道自己“这套组合”里还缺什么类型的店
+
         h_t = torch.zeros(self.config.EMBED_DIM).to(self.config.DEVICE) if not self.history_embs else torch.stack(self.history_embs).mean(dim=0)
         state = torch.cat([self.p_like, self.p_dislike, h_t], dim=-1)
         mask = torch.ones(self.config.TOTAL_CANDIDATES).to(self.config.DEVICE)
@@ -127,7 +125,6 @@ class EnhancedTravelPlanningEnv:
             
             valid_hits = sum(1 for pid in self.history_poi_ids if user_scores.get(pid, 0.0) >= 3.0)
 
-            # 只保留全局的集合多样性评估
             if entropy < self.config.ENTROPY_LOW_THRESH: 
                 step_reward -= self.config.ENTROPY_PENALTY 
             elif entropy > self.config.ENTROPY_HIGH_THRESH and valid_hits >= 2: 

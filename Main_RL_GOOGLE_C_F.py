@@ -7,22 +7,24 @@ import math
 import datetime
 import os
 import gc
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
 
 from AgentRL import GlobalConfig, PPOAgent
 from EncoderRL import DualPrototypeAlignmentModel, SemanticTokenizer
 from EnvironmentRL import EnhancedTravelPlanningEnv
 
-# ==========================================
-# 📂 路径配置区 (请确保路径与你本地一致)
-# ==========================================
-RAW_DATA_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_google\rl_cross_domain_data_12k.jsonl"
-LLM_PROFILE_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_google\google_extracted_preferences.jsonl"
-POI_META_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_google\rl_poi_metadata_12k.json"
-KDDC_TEST_CANDIDATES = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\google_candidate_C_F.json"
+
+# settings
+RAW_DATA_FILE = r"DUAL_RL_REC\data\google\rl_cross_domain.jsonl"
+LLM_PROFILE_FILE = r"DUAL_RL_REC\data\google\google_extracted_preferences.jsonl"
+POI_META_FILE = r"DUAL_RL_REC\data\google\rl_poi_metadata.json"
+KDDC_TEST_CANDIDATES = r"DUAL_RL_REC\google_candidate_C_F.json"
 
 def build_training_candidates(raw_data_file, poi_meta, config):
     train_candidates = {}
-    all_source_pois = [pid for pid, meta in poi_meta.items() if meta.get('city') == 'California']     #####这里的源域城市每次记得修改
+    all_source_pois = [pid for pid, meta in poi_meta.items() if meta.get('city') == 'California']   
     with open(raw_data_file, 'r', encoding='utf-8') as f:
         for line in f:
             if not line.strip(): continue
@@ -75,36 +77,21 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.linear")
 
-# ==========================================
-# 🌟 论文级双域独立映射可视化（隐藏坐标轴 + 隐藏图例 + 居中对称版）
-# ==========================================
+
 def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, config, save_dir="visualizations"):
     os.makedirs(save_dir, exist_ok=True) 
     encoder.eval()
-    try:
-        import matplotlib.pyplot as plt
-        from sklearn.manifold import TSNE
-    except ImportError:
-        return
 
-    # ==========================================
-    # 🎨 论文作图核心参数调整区 (请在这里自行微调)
-    # ==========================================
-    # 1. 留白比例 (Padding)
-    BASE_PAD = 0.05          # 基础四周留白，0.08 表示 8% 
+    BASE_PAD = 0.05        
     
-    # 🚀 去掉图例后，不再需要大幅向右扩充，恢复居中对称的留白
-    RIGHT_EXTEND = 1.05      # 右侧稍微留一点呼吸空间即可
-    TOP_EXTEND = 1.05        # 上侧给标题留出空间
+    RIGHT_EXTEND = 1.05    
+    TOP_EXTEND = 1.05       
     
-    # 2. 文本字号 (Font Size)
-    TITLE_SIZE = 25         # 图片标题字号 (稍微再放大一点，更显大气)
+    TITLE_SIZE = 25       
     
-    # 3. 散点大小 (Scatter Size)
-    SIZE_POI = 30            # 背景普通商铺圆点的大小
-    SIZE_LIKE = 350          # 红色五角星 (P_like) 的大小
-    SIZE_DISLIKE = 160       # 蓝色叉号 (P_dislike) 的大小
-    # ==========================================
+    SIZE_POI = 30           
+    SIZE_LIKE = 350         
+    SIZE_DISLIKE = 160      
 
     with torch.inference_mode():
         with torch.amp.autocast('cuda'):
@@ -144,21 +131,17 @@ def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, confi
             like_2d = reduced[num_src+num_tgt : num_src+num_tgt+num_likes]
             dislike_2d = reduced[num_src+num_tgt+num_likes :]
             
-            # 使用提取出的参数计算留白
             x_min, x_max = reduced[:, 0].min(), reduced[:, 0].max()
             y_min, y_max = reduced[:, 1].min(), reduced[:, 1].max()
             x_pad = (x_max - x_min) * BASE_PAD
             y_pad = (y_max - y_min) * BASE_PAD
             
-            # 动态计算最终坐标轴界限
             final_x_min = x_min - x_pad
             final_x_max = x_max + x_pad * RIGHT_EXTEND
             final_y_min = y_min - y_pad
             final_y_max = y_max + y_pad * TOP_EXTEND
             
-            # ==========================================
-            # 🎨 绘图 1: 源域 (Source Domain) 分布图
-            # ==========================================
+
             plt.figure(figsize=(10, 8))
             plt.scatter(src_2d[:, 0], src_2d[:, 1], c='#4DB6AC', alpha=0.45, s=SIZE_POI, edgecolors='none')
             plt.scatter(like_2d[:, 0], like_2d[:, 1], c='#E53935', marker='*', s=SIZE_LIKE, edgecolors='white', linewidths=1.2, zorder=5)
@@ -169,7 +152,6 @@ def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, confi
             
             plt.title(f'Feature Space: Source Domain (Epoch {episode})', fontsize=TITLE_SIZE, fontweight='bold', pad=20)
             
-            # 🚀 彻底隐藏坐标轴刻度及数字
             plt.xticks([])
             plt.yticks([])
             
@@ -184,9 +166,7 @@ def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, confi
             plt.savefig(src_filename, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close()
 
-            # ==========================================
-            # 🎨 绘图 2: 目标域 (Target Domain) 分布图
-            # ==========================================
+
             plt.figure(figsize=(10, 8))
             plt.scatter(tgt_2d[:, 0], tgt_2d[:, 1], c='#66BB6A', alpha=0.45, s=SIZE_POI, edgecolors='none')
             plt.scatter(like_2d[:, 0], like_2d[:, 1], c='#E53935', marker='*', s=SIZE_LIKE, edgecolors='white', linewidths=1.2, zorder=5)
@@ -197,7 +177,6 @@ def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, confi
             
             plt.title(f'Feature Space: Target Domain (Epoch {episode})', fontsize=TITLE_SIZE, fontweight='bold', pad=20)
             
-            # 🚀 彻底隐藏坐标轴刻度及数字
             plt.xticks([])
             plt.yticks([])
             
@@ -212,10 +191,9 @@ def visualize_embeddings(encoder, train_env, test_env, tokenizer, episode, confi
             plt.savefig(tgt_filename, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close('all') 
             
-    import gc
     gc.collect()
     torch.cuda.empty_cache()
-    print(f"\n📸 [可视化] 论文级双域特征图已分别保存至:\n -> {src_filename}\n -> {tgt_filename}\n")
+    print(f"distribution saved to:\n -> {src_filename}\n -> {tgt_filename}\n")
 
 
 def evaluate_zero_shot(agent, encoder, test_env, tokenizer, target_ground_truth, config):
@@ -270,7 +248,7 @@ def evaluate_zero_shot(agent, encoder, test_env, tokenizer, target_ground_truth,
                 torch.cuda.empty_cache()
                 
     curr_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{curr_time}] =================== 测试集最终评估结果 ===================")
+    print(f"\n[{curr_time}] =================== results on test ===================")
     for k in k_list:
         rec = np.mean(metrics[k]['Recall'])
         pre = np.mean(metrics[k]['Pre'])
@@ -314,8 +292,8 @@ def main():
     episode_count = 0
     total_reward = 0
     
-    print("\n🚀 全系统端到端联合训练启动...")
-    print("📸 [初始化] 正在绘制未经强化的初始特征分布 (Epoch 0)...")
+    print(" training start")
+    print(" original distribution (Epoch 0)...")
     visualize_embeddings(encoder, train_env, test_env, tokenizer, 0, config)
     
     random.shuffle(train_users)
@@ -392,7 +370,7 @@ def main():
             
             if current_recall_20 > best_test_recall:
                 best_test_recall = current_recall_20
-                print(f"🏆 [新 SOTA 诞生] 发现更高 Recall@20: {best_test_recall:.4f}！正在保存模型权重...")
+                print(f"max Recall@20: {best_test_recall:.4f} for now, saving the paremeter")
                 
                 torch.save(encoder.state_dict(), "best_encoder_weights.pth")
                 torch.save(agent.actor.state_dict(), "best_agent_actor_weights.pth")
@@ -400,7 +378,7 @@ def main():
 
     with open('training_logs.json', 'w') as f:
         json.dump(history_logs, f)
-    print("✅ 训练完成，日志文件已保存为 training_logs.json")
+    print("finished, training_logs.json")
 
 if __name__ == "__main__":
     main()

@@ -4,15 +4,15 @@ import os
 import re
 from openai import OpenAI
 
-# ================= 配置区 =================
-DEEPSEEK_API_KEY = "sk-3d03fb0db4a94d92948ac373ac172690"  # 填入你的 API Key
+# ================= settings =================
+DEEPSEEK_API_KEY = "API KEY"  # true API Key
 BASE_URL = "https://api.deepseek.com"
 
-# 原始全量数据
-INPUT_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\rl_cross_domain_data.jsonl"
-# 你目前跑出来的 1216 个人的文件（作为基座，继续往里追加）
-OUTPUT_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\llm_extracted_preferences.jsonl"
-POI_META_FILE = r"D:\VsCodeProjects\RL（完美时间＋路程个性化，尝试多城市，2025.9.13 - 副本\Aligned_Data\rl_poi_metadata.json"
+
+INPUT_FILE = r"DUAL_RL_REC/data/yelp/cross_domain_data.jsonl"
+
+OUTPUT_FILE = r""
+POI_META_FILE = r"DUAL_RL_REC/data/yelp/POI_mata_data.json"
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=BASE_URL)
 
@@ -44,8 +44,8 @@ def build_prompt(records):
             "poi_attributes": cleaned_attrs
         })
     
-    system_prompt = """你是一个专业的推荐系统数据分析专家。
-请严格输出以下 JSON 结构（务必保持 attributes 为键值对字典格式）：
+    system_prompt = """You are a professional recommendation system data analysis expert.
+Please strictly output the following JSON structure (ensure that attributes remain a key-value pair dictionary format):
 {
   "global_liked": {
     "categories": ["Japanese Sushi", "Luxury Boutique Hotels"], 
@@ -56,16 +56,16 @@ def build_prompt(records):
     "attributes": {"NoiseLevel": "loud"} 
   },
   "poi_scores": {
-    "地点poi_id": 4.5 
+    "place_poi_id": 4.5 
   }
 }
-要求：提取细粒度 categories；attributes 必须是纯文本无嵌套字典；直接输出合法 JSON。"""
+Requirements: Extract fine-grained categories; attributes must be plain text with no nested dictionaries; output valid JSON directly."""
 
-    user_prompt = f"这是用户的打卡记录：\n{json.dumps(simplified_records, ensure_ascii=False)}"
+    user_prompt = f"This is the user's check-in records:\n{json.dumps(simplified_records, ensure_ascii=False)}"
     return system_prompt, user_prompt
 
 def process_user_records(user_data):
-    # 【核心绝杀】：只取源域最近 20 条 + 目标域最近 20 条！杜绝 Token 爆炸和 JSON 截断！
+
     src_records = user_data.get("source_records", [])[-20:]
     tgt_records = user_data.get("target_records", [])[-20:]
     all_records = src_records + tgt_records
@@ -91,7 +91,7 @@ def process_user_records(user_data):
             if json_match:
                 result_text = json_match.group(0)
             else:
-                raise ValueError("未找到合法 JSON")
+                raise ValueError("No valid JSON found")
                 
             parsed_json = json.loads(result_text)
             return {
@@ -104,7 +104,6 @@ def process_user_records(user_data):
             print(f"  [Attempt {attempt+1}/3] Error: {e}")
             time.sleep(2)
             
-    # 彻底失败兜底
     return {
         "user_id": user_data["user_id"],
         "global_liked": {"categories": [], "attributes": {}},
@@ -120,7 +119,7 @@ def main():
                 if line.strip():
                     completed_users.add(json.loads(line)['user_id'])
     
-    print(f"🚀 已检测到 {len(completed_users)} 个完成记录，即将处理剩余怪兽级用户...")
+    print(f"Detected {len(completed_users)} completed records, processing remaining users...")
     
     processed_count = 0
     with open(INPUT_FILE, 'r', encoding='utf-8') as fin, open(OUTPUT_FILE, 'a', encoding='utf-8') as fout:
@@ -132,7 +131,7 @@ def main():
                 continue
                 
             processed_count += 1
-            print(f"[{processed_count + len(completed_users)}/1256] 正在镇压用户: {uid} ...")
+            print(f"[{processed_count + len(completed_users)}/1256] Processing user: {uid} ...")
             
             final_profile = process_user_records(user_data)
             
@@ -142,7 +141,7 @@ def main():
                 
             time.sleep(0.5)
 
-    print(f"\n✅ 全部 1256 名用户收官，完美落幕！")
+    print(f"All users completed")
 
 if __name__ == "__main__":
     main()
