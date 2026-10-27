@@ -1,0 +1,84 @@
+{
+  "direction": "YELP_P_N",
+  "seed": 2026,
+  "device": "auto",
+  "deterministic": true,
+  "num_threads": 4,
+  "output_dir": "outputs/yelp_p_n",
+  "data": {
+    "interactions": "data/source_users.jsonl",
+    "metadata": "data/poi_metadata.json",
+    "profiles": "data/profiles.jsonl",
+    "candidates": "data/candidates.json",
+    "source_key": "source_records",
+    "source_region": "Philadelphia",
+    "target_region": "New Orleans",
+    "region_fields": [
+      "domain",
+      "city",
+      "state"
+    ],
+    "feature_fields": [
+      "features",
+      "categories",
+      "attributes"
+    ],
+    "record_order": "timestamp_if_complete",
+    "rating_aggregation": "latest",
+    "cached_profiles_scope": "source_only"
+  },
+  "model": {
+    "dimension": 128,
+    "vocab_size": 20000,
+    "max_tokens": 128,
+    "heads": 8,
+    "layers": 4,
+    "dropout": 0.2,
+    "temperature": 0.1,
+    "actor_hidden": [
+      256,
+      128
+    ]
+  },
+  "training": {
+    "episodes": 6000,
+    "decision_steps": 20,
+    "feedback_users": 50,
+    "source_candidates": 100,
+    "max_visited_candidates": 10,
+    "warmup_epochs": 3,
+    "warmup_batch_size": 64,
+    "feedback_epochs": 3,
+    "feedback_batch_size": 64,
+    "encoder_warmup_lr": 0.0001,
+    "encoder_feedback_lr": 1e-05,
+    "encoder_weight_decay": 0.01,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0003,
+    "ppo_epochs": 4,
+    "ppo_clip": 0.2,
+    "value_clip": 0.2,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "normalize_advantage": true,
+    "residual_start": 1.0,
+    "residual_end": 0.1,
+    "encoder_grad_clip": 1.0,
+    "policy_grad_clip": 0.5,
+    "checkpoint_every": 500
+  },
+  "inference": {
+    "top_k": 20,
+    "encode_batch_size": 256
+  },
+  "profiling": {
+    "base_url": "https://api.deepseek.com",
+    "model": "",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "temperature": 0.0,
+    "max_output_tokens": 2048,
+    "max_input_chars": 180000,
+    "timeout_seconds": 120,
+    "retries": 3
+  }
+}

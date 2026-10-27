@@ -1,0 +1,2 @@
+# Install the CPU/CUDA build of PyTorch appropriate for your machine first.
+torch>=2.6,<3

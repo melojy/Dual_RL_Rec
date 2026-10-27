@@ -1,6 +1,8 @@
-# Dual_RL_Rec
+# DPFR
 
-This is the repository for the paper: **"Bridging the Domain Gap: POI Recommendation via Dual-Prototype Semantic Alignment and Reinforcement Learning"**.
+**Dual-Prototype Transfer with Feedback Refinement for POI Recommendation**
+
+DPFR extracts positive/negative source-user profiles, learns shared POI and prototype representations, and refines them through recommendation feedback. It exports user prototypes and recommendations over externally retrieved candidates.
 
 ---
 
@@ -10,7 +12,7 @@ This is the repository for the paper: **"Bridging the Domain Gap: POI Recommenda
 Here we provide the overall intuition and performance comparison of our proposed method.
 
 <p align="center">
-  <img src="results/visualization/Introduction.png" alt="Introduction" width="70%">
+  <img src="Figures/Introduction.png" alt="Introduction" width="70%">
 </p>
 
 ---
@@ -20,82 +22,83 @@ Here we provide the overall intuition and performance comparison of our proposed
 ## Methodology & Framework
 
 <p align="center">
-  <img src="results/visualization/FrameWork.png" alt="Framework" width="70%">
+  <img src="Figures/FrameWork.png" alt="Framework" width="70%">
 </p>
 
 ---
 
 
+## Setup
 
-## User Profiling Prompts
-As specified in the paper, we leverage Large Language Models (LLMs) to perform semantic data augmentation and extract fine-grained user profiles from review data. 
+Python 3.10+ and PyTorch are required. Install the appropriate CPU/CUDA build of PyTorch for your machine, then run:
 
-Below is the complete **System Prompt** and **User Prompt** structure used for user preference extraction:
+```bash
+python -m pip install -r requirements.txt
+```
 
-### System Prompt
-"""You are a rigorous data analysis expert for recommendation systems. Please extract the user profile and score each POI based on the user's minimalist check-in records. Note: Records containing 'Cat' and 'Attr' represent POI samples, while those with 'Rev' represent user review samples.
+## Code
 
-    Please strictly output the following JSON format (do not output Markdown markers like ```json, just output the curly braces):
+| File | Implementation |
+|---|---|
+| `EncoderRL.py` | Tokenization, shared Transformer, projection, three encoder losses and feedback updates |
+| `AgentRL.py` | Actor/Critic networks, residual queries, rollout collection, GAE and PPO |
+| `EnvironmentRL.py` | Data loading, source candidate sampling, states, action masks and rating-based rewards |
+| `Train.py` | Encoder initialization, joint training, checkpoints, prototype export and frozen inference |
+| `EmotionParser.py` | English prompts, API requests, JSON parsing and source-profile caching |
+| `Config.py` | Parameters, path handling, validation and checkpoint/file utilities |
 
+## Data
+
+Download [Yelp](https://business.yelp.com/data/resources/open-dataset/) or [Google Local](https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/) under their dataset terms. Prepare one transfer direction and put these UTF-8 files in `data/`:
+
+**`poi_metadata.json`** - source and target POIs; preserve attribute values and deduplicate features.
+```json
 {
-"global_liked": {"categories": ["sub-category 1"], "attributes": {"attribute_key": "value"}},
-"global_disliked": {"categories": ["sub-category 2"], "attributes": {"attribute_key": "value"}},
-"poi_scores": {"1": 4.5, "2": 3.0}
+  "s1": {"domain": "Philadelphia", "features": ["Cafe", "WiFi=free"]},
+  "t1": {"domain": "New Orleans", "features": ["Cafe", "WiFi=free"]}
 }
+```
 
-[Ensure the output adheres strictly to the following principles]:
-1. Principle of Category Mutually Exclusive: The categories in global_liked and global_disliked must NEVER overlap. If similar categories exist, they must be subdivided with specific modifiers (e.g., liked: ["Luxury Hotel"], disliked: ["Noisy Motel"]).
-2. Principle of Objective Environment: The attributes must be specific, objective physical or facility characteristics (e.g., "WiFi": "free").
-3. Principle of Short-ID Scoring: The keys in poi_scores MUST be the minimalist pure numeric IDs read from the input (e.g., "1", "2", "3"). You must provide a comprehensive score ranging from 1.0 to 5.0 for all numeric IDs present in the input, based on the user's sentiment explicitly expressed in the reviews."""
+**`source_users.jsonl`** - one source history per line, in chronological order; retain original ratings and reviews.
+```json
+{"user_id":"u1","source_records":[{"poi_id":"s1","rating":4.5,"review":"I liked the free WiFi."}]}
+```
 
-### User Prompt
-   user_prompt = f"User Records: \n{compressed_text}"
+**`profiles.jsonl`** - cached source profiles, one user per line. Generate it with `EmotionParser.py` only when needed.
+```json
+{"user_id":"u1","global_liked":["Cafe","WiFi=free"],"global_disliked":[]}
+```
 
+**`candidates.json`** - output of any external retriever, before DPFR selection.
+```json
+{"u1":["t1","t2","t3"]}
+```
 
+The snippets illustrate schemas, not a demo dataset. Every candidate needs metadata and a user with source prototypes. Keep IDs as strings and target histories/ratings out of model inputs. Legacy `business_id`/`gmap_id`, `stars`, `text`, and `categories`/`attributes` fields are accepted. No retriever is bundled.
 
+## Run
 
+Edit `config.json`: data paths, source/target domains and output directory. Relative paths resolve from the config file; absolute paths are also accepted. Hyperparameters are centralized there. Use separate profiles and output directories for reverse transfer directions.
 
-## Other Implementation Details
+```bash
+python Train.py --config config.json --check
+python Train.py --config config.json
+python Train.py --config config.json --mode predict
+```
 
-### Model Architecture
-* **Feature Extraction Module:** Adopts a 4-layer Transformer encoder structure. The multi-head attention mechanism consists of 8 attention heads. 
-* **Reinforcement Learning (RL) Agent:** Both the Actor and Critic networks adopt a multi-layer perceptron (MLP) architecture. The input dimension is 384 (formed by concatenating the positive prototype, negative prototype, and historical trajectory mean). The Actor network outputs a 128-dimensional continuous residual vector, while the Critic network outputs a scalar state value.
-* **Semantic Parsing:** Utilizes the **DeepSeek-V3** large language model. The sampling temperature is strictly set to 0.1 to ensure the determinism and consistency of entity-attribute extraction.
+Resume training with `--resume outputs/yelp_p_n/training_state.pt`. Prediction loads `model.pt`, target metadata and candidates; it does not require source histories or profile files. Candidates are deduplicated, and short lists return only the available POIs.
 
-### Hyperparameters & Training Settings
-The joint training process ensures each user is updated at least once, with the agent performing a maximum of $T=20$ exploration steps per epoch. 
+### Optional profile extraction
 
-| Component / Parameter | Setting / Value |
-| :--- | :--- |
-| **Transformer Encoder** | Embedding dim $d=128$, Max seq length $J=60$ |
-| **Encoder Regularization** | GELU activation, Dropout rate = 0.2 |
-| **Max Training Epochs** | 6000 (Yelp), 24000 (Google Local) |
-| **Optimizers** | AdamW (Encoder: lr=$10^{-5}$)<br>Adam (Actor: lr=$10^{-4}$, Critic: lr=$3 \times 10^{-4}$) |
-| **PPO Algorithm** | Discount factor $\gamma=0.99$<br>GAE smoothing $\lambda=0.95$<br>Clipping threshold $\varepsilon=0.2$<br>Update iterations $F=4$ |
+Set `profiling.base_url` and `profiling.model` to your API endpoint and exact model ID. The English system and user prompts are directly in `EmotionParser.py`. Set the key through an environment variable, for example in PowerShell:
 
-### Zero-Shot Cross-Domain Evaluation
-In this stage, the parameters of both the underlying semantic encoder and the Actor network are **frozen**. 
-1.  **Offline Processing:** The system first performs a one-time offline processing of the candidate POI metadata and the target user's global profile in the target domain. 
-2.  **Inference:** The Actor network receives the initial state of the target domain and completes action output solely through lightweight forward propagation and matrix inner-product operations. 
-3.  **Recommendation Standard:** We adopt the Top-K standard, selecting the top-$k$ uninteracted entities with the highest scores from the environment candidate set.
+```powershell
+$env:DEEPSEEK_API_KEY = "YOUR_API_KEY"
+python EmotionParser.py --config config.json --allow-api
+```
 
+Existing profiles are reused. Training never calls an API. To inspect the actual input without sending a request, use `--preview outputs/prompt.json` instead of `--allow-api`.
 
+## Outputs
 
-
-
-
-## How to use our method
-
-1.First, download the original Google Local and Yelp datasets into the data folder. The download links are:
-Yelp Open Dataset: https://business.yelp.com/data/resources/open-dataset/
-Google Local dataset: https://mcauleylab.ucsd.edu/public%20datasets/gdrive/googlelocal/
-
-2.Perform preliminary data processing using the scripts provided in the data folder (make sure to verify the actual file paths and file types).
-
-3.Extract user profiles using the LLM-based processing scripts in the aligned_google and aligned_yelp folders (ensure that you verify the actual large language model API calls and the input/output file paths).
-
-4.Depending on the types of the source and target domains, select and run the corresponding main script from the four options (make sure to verify the data paths).
-
-
-
-
+The configured output directory contains `model.pt`, `prototypes.jsonl` (each user's `positive_prototype` and `negative_prototype`), and `recommendations.json` (`user_id` to `recommended_pois`). Training also saves a resume checkpoint and a lightweight log. No evaluation, plotting or experiment runners are included.

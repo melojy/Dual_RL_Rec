@@ -1,203 +1,234 @@
+"""DPFR Actor-Critic policy, source rollouts and PPO optimization.
+
+The Actor produces a residual vector, not fixed POI-ID logits. A query formed
+as x + w_r * Actor(S) is matched with the current candidates. PPO operates on
+collection-time feature snapshots before the encoder is updated.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+import math
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Categorical
+from torch import nn
 
+if TYPE_CHECKING:
+    from EnvironmentRL import SourceRecommendationEnvironment
 
-
-class GlobalConfig:
-    def __init__(self):
-
-        self.TOTAL_CANDIDATES = 100    
-        self.MAX_POS_POIS = 20         
-        self.EMBED_DIM = 128           
-        self.STATE_DIM = 384           
-        self.DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        self.VOCAB_SIZE = 20000        
-        self.TEXT_MAX_LEN = 30         
-        
-        self.MAX_STEPS = 20            
-        self.GAMMA = 0.99  
-                    
-        self.LR_ACTOR = 1e-4           
-        self.LR_CRITIC = 3e-4          
-        self.LR_PRETRAIN = 1e-4        
-        self.LR_RL_FINETUNE = 1e-5     
-        self.PPO_EPOCHS = 4            
-        self.PPO_CLIP = 0.2            
-        
-        self.R_SUPER_LIKE = 10.0       
-        self.R_HATE = -10.0            
-        self.R_NORMAL_LIKE = 1.0       
-        self.R_EXPLORE = -1.0           
-        
-        self.SIMILARITY_PENALTY = 0.0  
-        self.SIMILARITY_THRESH = 1.0  
-        
-        self.ENTROPY_LOW_THRESH = 1.0  
-        self.ENTROPY_PENALTY = 5.0    
-        self.ENTROPY_HIGH_THRESH = 2.5 
-        self.ENTROPY_BONUS = 2.0       
-
-        self.TEMP_START = 2.0          
-        self.TEMP_END = 0.5            
-        self.ENTROPY_COEF_START = 0.1 
-        self.ENTROPY_COEF_END = 0.001  
-        
-        self.RESIDUAL_START = 1.0   
-        
-        self.RESIDUAL_END = 0.1
-
-class Memory:
-    def __init__(self):
-        self.states, self.candidate_embs, self.masks, self.actions = [], [], [], []
-        self.logprobs, self.rewards, self.is_terminals, self.values = [], [], [], []
-
-    def clear(self):
-        del self.states[:], self.candidate_embs[:], self.masks[:], self.actions[:]
-        del self.logprobs[:], self.rewards[:], self.is_terminals[:], self.values[:]
-
-class PPOAgent(nn.Module):
-    def __init__(self, config):
+class ActorCritic(nn.Module):
+    def __init__(self, model_cfg: dict):
         super().__init__()
-        self.config = config
-        self.temperature = config.TEMP_START
-        self.entropy_coef = config.ENTROPY_COEF_START
-        self.residual_weight = config.RESIDUAL_START 
-        
-        self.actor = nn.Sequential(
-            nn.Linear(config.STATE_DIM, 256), nn.LayerNorm(256), nn.Tanh(),
-            nn.Linear(256, 128), nn.Tanh(), nn.Linear(128, config.EMBED_DIM)
-        )
-        
-        self.critic = nn.Sequential(
-            nn.Linear(config.STATE_DIM, 256), nn.LayerNorm(256), nn.Tanh(),
-            nn.Linear(256, 128), nn.Tanh(), nn.Linear(128, 1)
-        )
-        
-        self.optimizer = torch.optim.Adam([
-            {'params': self.actor.parameters(), 'lr': config.LR_ACTOR},
-            {'params': self.critic.parameters(), 'lr': config.LR_CRITIC}
-        ])
-        
-        self.memory = Memory()
-        self.MseLoss = nn.MSELoss()
+        d = model_cfg["dimension"]
+        self.dimension = d
+        self.temperature = model_cfg["temperature"]
+        a, b = model_cfg["actor_hidden"]
+        self.actor = nn.Sequential(nn.Linear(3 * d, a), nn.LayerNorm(a), nn.Tanh(),
+                                   nn.Linear(a, b), nn.Tanh(), nn.Linear(b, d))
+        self.critic = nn.Sequential(nn.Linear(3 * d, a), nn.LayerNorm(a), nn.Tanh(),
+                                    nn.Linear(a, b), nn.Tanh(), nn.Linear(b, 1))
 
-    def anneal_exploration(self, current_episode, max_episodes):
-        fraction = min(current_episode / max_episodes, 1.0)
-        self.temperature = self.config.TEMP_START - fraction * (self.config.TEMP_START - self.config.TEMP_END)
-        self.entropy_coef = self.config.ENTROPY_COEF_START - fraction * (self.config.ENTROPY_COEF_START - self.config.ENTROPY_COEF_END)
-        
-        self.residual_weight = self.config.RESIDUAL_START - fraction * (self.config.RESIDUAL_START - self.config.RESIDUAL_END)
+    def query(self, states: torch.Tensor, residual_weight: float) -> torch.Tensor:
+        """Construct q_t = x_i + w_r A_theta(S_t), without an extra normalization."""
+        if states.ndim not in (1, 2) or states.shape[-1] != 3 * self.dimension:
+            raise ValueError("State must have shape [3d] or [batch,3d]")
+        if not math.isfinite(residual_weight) or residual_weight < 0:
+            raise ValueError("Residual weight must be finite and nonnegative")
+        states = states.unsqueeze(0) if states.ndim == 1 else states
+        return states[:, :self.dimension] + residual_weight * self.actor(states)
 
-    def forward(self, state, candidate_embs, mask):
-        p_like = state[:, :self.config.EMBED_DIM] if state.dim() == 2 else state[:self.config.EMBED_DIM]
-        residual = self.actor(state)
-        
-        query = p_like + residual * self.residual_weight 
-        
-        query = F.normalize(query, p=2, dim=-1, eps=1e-8)
-        
-        candidate_embs_t = candidate_embs.transpose(1, 2).contiguous()
-        action_logits = torch.bmm(query.unsqueeze(1), candidate_embs_t).squeeze(1)
-        
-        action_logits = (action_logits * 10.0) / self.temperature
-        
-        huge_negative = torch.tensor(-1e8, dtype=torch.float32, device=self.config.DEVICE)
-        action_logits = torch.where(mask > 0.5, action_logits, huge_negative)
-        
-        action_probs = F.softmax(action_logits, dim=-1)
-        dist = Categorical(action_probs)
-        value = self.critic(state)
-        return dist, value
-
-    def select_action(self, state, candidate_embs, mask):
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-            candidate_embs = candidate_embs.unsqueeze(0)
+    def action_logits(self, states: torch.Tensor, candidates: torch.Tensor,
+                      mask: torch.Tensor, residual_weight: float) -> torch.Tensor:
+        """Score only available candidates; source/target POI IDs are not parameters."""
+        query = self.query(states, residual_weight)
+        if candidates.ndim not in (2, 3) or candidates.shape[-1] != self.dimension:
+            raise ValueError("Candidate vectors must have shape [items,d] or [batch,items,d]")
+        if mask.ndim == 1:
             mask = mask.unsqueeze(0)
-            
-        with torch.no_grad():
-            dist, value = self.forward(state, candidate_embs, mask)
-            action = dist.sample()
-            
-        self.memory.states.append(state.squeeze(0))
-        self.memory.candidate_embs.append(candidate_embs.squeeze(0))
-        self.memory.masks.append(mask.squeeze(0))
-        self.memory.actions.append(action.squeeze(0))
-        self.memory.logprobs.append(dist.log_prob(action).squeeze(0))
-        self.memory.values.append(value.squeeze(0))
-        
-        return action.item()
+        if mask.dtype != torch.bool or mask.ndim != 2:
+            raise ValueError("The action mask must be a boolean matrix")
+        expected = (query.shape[0], candidates.shape[-2])
+        if tuple(mask.shape) != expected:
+            raise ValueError("Action mask shape does not match the states/candidates")
+        if not bool(mask.any(dim=-1).all()):
+            raise ValueError("Cannot choose an action when all candidates are masked")
+        if candidates.ndim == 2:
+            scores = query @ candidates.T
+        else:
+            if candidates.shape[0] != query.shape[0]:
+                raise ValueError("Candidate batch size differs from state batch size")
+            scores = torch.bmm(query.unsqueeze(1), candidates.transpose(1, 2)).squeeze(1)
+        if not bool(torch.isfinite(scores).all()):
+            raise FloatingPointError("Non-finite candidate matching scores")
+        # Only the paper's temperature is applied: there is no extra factor of 10.
+        return (scores / self.temperature).masked_fill(~mask, float("-inf"))
 
-    def update(self):
-        if len(self.memory.rewards) == 0: return 0.0, 0.0
-        
-        gae_lambda = 0.95
-        advantages = []
-        gae = 0.0
-        
-        values = [v.item() for v in self.memory.values]
-        values.append(0.0) 
-        
-        for i in reversed(range(len(self.memory.rewards))):
-            if self.memory.is_terminals[i]:
-                next_value = 0.0
-                gae = 0.0  
-            else:
-                next_value = values[i + 1]
-                
-            delta = self.memory.rewards[i] + self.config.GAMMA * next_value - values[i]
+    def distribution(self, states: torch.Tensor, candidates: torch.Tensor,
+                     mask: torch.Tensor, residual_weight: float):
+        logits = self.action_logits(states, candidates, mask, residual_weight)
+        return torch.distributions.Categorical(logits=logits)
 
-            gae = delta + self.config.GAMMA * gae_lambda * gae
-            advantages.insert(0, gae)
-            
-        advantages = torch.tensor(advantages, dtype=torch.float32).to(self.config.DEVICE)
-        
-        old_values = torch.stack(self.memory.values).squeeze(-1).to(self.config.DEVICE).detach()
-        returns = advantages + old_values
-        
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
-        
-        old_states = torch.stack(self.memory.states).to(self.config.DEVICE).detach()
-        old_candidate_embs = torch.stack(self.memory.candidate_embs).to(self.config.DEVICE).detach()
-        old_masks = torch.stack(self.memory.masks).to(self.config.DEVICE).detach()
-        old_actions = torch.stack(self.memory.actions).to(self.config.DEVICE).detach()
-        old_logprobs = torch.stack(self.memory.logprobs).to(self.config.DEVICE).detach()
+    def value(self, states: torch.Tensor) -> torch.Tensor:
+        """The Critic is used for source policy optimization, not target scoring."""
+        return self.critic(states).squeeze(-1)
 
-        total_a_loss, total_c_loss = 0, 0
-        for _ in range(self.config.PPO_EPOCHS):
-            dist, state_values = self.forward(old_states, old_candidate_embs, old_masks)
-            logprobs = dist.log_prob(old_actions)
-            dist_entropy = dist.entropy()
-            
-            ratios = torch.exp(logprobs - old_logprobs)
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.config.PPO_CLIP, 1 + self.config.PPO_CLIP) * advantages
-            
-            actor_loss = -torch.min(surr1, surr2).mean()
-            
-            value_pred_clipped = old_values + torch.clamp(
-                state_values.squeeze(-1) - old_values, 
-                -self.config.PPO_CLIP, 
-                self.config.PPO_CLIP
-            )
-            v_loss1 = (state_values.squeeze(-1) - returns) ** 2
-            v_loss2 = (value_pred_clipped - returns) ** 2
-            critic_loss = 0.5 * torch.max(v_loss1, v_loss2).mean()
-            
-            entropy_bonus = self.entropy_coef * dist_entropy.mean()
-            
-            loss = actor_loss + critic_loss - entropy_bonus
-            
-            self.optimizer.zero_grad()
+    @torch.no_grad()
+    def greedy_action(self, state: torch.Tensor, candidates: torch.Tensor,
+                      mask: torch.Tensor, weight: float) -> int:
+        """Deterministic inference. Equal scores follow the supplied candidate order."""
+        logits = self.action_logits(state, candidates, mask, weight)
+        if len(logits) != 1:
+            raise ValueError("greedy_action expects exactly one recommendation state")
+        return int(logits.argmax(dim=-1).item())
+
+
+@dataclass
+class Rollout:
+    states: torch.Tensor
+    candidates: torch.Tensor
+    masks: torch.Tensor
+    actions: torch.Tensor
+    old_logprobs: torch.Tensor
+    old_values: torch.Tensor
+    rewards: torch.Tensor
+    terminals: torch.Tensor
+    residual_weight: float
+
+    def validate(self) -> None:
+        """Check trajectory alignment before using old probabilities in PPO."""
+        length = len(self.actions)
+        if length == 0 or self.states.ndim != 2 or self.masks.ndim != 2:
+            raise ValueError("A rollout needs nonempty state and mask matrices")
+        if self.candidates.ndim != 2:
+            raise ValueError("A rollout uses one fixed candidate matrix")
+        if self.states.shape[0] != length or self.masks.shape != (length, len(self.candidates)):
+            raise ValueError("States, actions and candidate masks do not align")
+        for vector in (self.actions, self.old_logprobs, self.old_values, self.rewards, self.terminals):
+            if vector.shape != (length,):
+                raise ValueError("Every per-step rollout field must have shape [steps]")
+        if self.actions.dtype != torch.long or self.masks.dtype != torch.bool:
+            raise ValueError("Actions must be int64 and masks must be boolean")
+        if self.terminals.dtype != torch.bool or not bool(self.terminals[-1]):
+            raise ValueError("A source-user rollout must end with a terminal step")
+        if bool((self.actions < 0).any()) or bool((self.actions >= len(self.candidates)).any()):
+            raise ValueError("A rollout contains an out-of-range action")
+        if not bool(self.masks.gather(1, self.actions[:, None]).all()):
+            raise ValueError("A rollout contains a masked action")
+        for tensor in (self.states, self.candidates, self.old_logprobs, self.old_values, self.rewards):
+            if tensor.requires_grad or not bool(torch.isfinite(tensor).all()):
+                raise ValueError("Stored rollout features must be finite detached snapshots")
+
+
+
+def gae(rewards, values, terminals, gamma: float, lam: float, bootstrap: float = 0.0):
+    if rewards.ndim != 1 or values.shape != rewards.shape or terminals.shape != rewards.shape:
+        raise ValueError("GAE expects aligned one-dimensional trajectories")
+    if terminals.dtype != torch.bool or not 0 <= gamma <= 1 or not 0 <= lam <= 1:
+        raise ValueError("Invalid terminal mask or GAE coefficients")
+    advantage = torch.zeros_like(rewards)
+    running = rewards.new_tensor(0.0)
+    next_value = rewards.new_tensor(bootstrap)
+    for i in range(len(rewards) - 1, -1, -1):
+        keep = (~terminals[i]).to(rewards.dtype)
+        delta = rewards[i] + gamma * next_value * keep - values[i]
+        running = delta + gamma * lam * keep * running
+        advantage[i] = running
+        next_value = values[i]
+    return advantage, advantage + values
+
+
+def residual_weight_at(episode: int, total_episodes: int, start: float, end: float) -> float:
+    """Linear schedule evaluated once per rollout, then held fixed for its update."""
+    progress = min(max(episode / max(total_episodes - 1, 1), 0.0), 1.0)
+    return start + progress * (end - start)
+
+
+class PPOAgent:
+    def __init__(self, policy: ActorCritic, cfg: dict):
+        self.policy, self.cfg = policy, cfg
+        self.optimizer = torch.optim.Adam([
+            {"params": policy.actor.parameters(), "lr": cfg["actor_lr"]},
+            {"params": policy.critic.parameters(), "lr": cfg["critic_lr"]}])
+
+    def update(self, r: Rollout) -> dict:
+        r.validate()
+        self.policy.train()
+        advantage, returns = gae(r.rewards, r.old_values, r.terminals,
+                                 self.cfg["gamma"], self.cfg["gae_lambda"])
+        if self.cfg["normalize_advantage"] and len(advantage) > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
+        advantage, returns = advantage.detach(), returns.detach()
+        total_a = total_v = 0.0
+        for _ in range(self.cfg["ppo_epochs"]):
+            # Re-evaluation uses the SAME states, candidate snapshot, mask and w_r.
+            dist = self.policy.distribution(r.states, r.candidates, r.masks, r.residual_weight)
+            ratio = (dist.log_prob(r.actions) - r.old_logprobs).exp()
+            unclipped = ratio * advantage
+            clipped = ratio.clamp(1 - self.cfg["ppo_clip"], 1 + self.cfg["ppo_clip"]) * advantage
+            actor_loss = -torch.minimum(unclipped, clipped).mean()
+            values = self.policy.value(r.states)
+            value_clipped = r.old_values + (values - r.old_values).clamp(
+                -self.cfg["value_clip"], self.cfg["value_clip"])
+            critic_loss = 0.5 * torch.maximum((values - returns).square(),
+                                             (value_clipped - returns).square()).mean()
+            # Paper-aligned: no policy-entropy term and no environment diversity reward.
+            loss = actor_loss + critic_loss
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Non-finite PPO loss")
+            self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.cfg["policy_grad_clip"],
+                                           error_if_nonfinite=True)
             self.optimizer.step()
-            
-            total_a_loss += actor_loss.item()
-            total_c_loss += critic_loss.item()
-            
-        self.memory.clear()
-        return total_a_loss / self.config.PPO_EPOCHS, total_c_loss / self.config.PPO_EPOCHS
+            total_a += float(actor_loss.detach())
+            total_v += float(critic_loss.detach())
+        n = self.cfg["ppo_epochs"]
+        return {"actor_loss": total_a / n, "critic_loss": total_v / n}
+
+    @torch.no_grad()
+    def collect_rollout(self, env: "SourceRecommendationEnvironment", weight: float
+                        ) -> tuple[Rollout, list[tuple[str, str, float]]]:
+        """Collect one source episode and encoder feedback using frozen features.
+
+        Exploration is sampling from the policy. The raw +10/-10/+1/-1 reward
+        is preserved in both the PPO trajectory and the encoder feedback buffer.
+        No policy-entropy bonus or separate diversity reward is introduced.
+        """
+        self.policy.eval()
+        snapshots = {key: [] for key in
+                     ("states", "masks", "actions", "logprobs", "values", "rewards", "terminals")}
+        feedback = []
+        while not env.done:
+            state, candidates, mask = env.observe()
+            distribution = self.policy.distribution(state, candidates, mask, weight)
+            action = distribution.sample().squeeze(0)
+            value = self.policy.value(state)
+            logprob = distribution.log_prob(action).squeeze(0)
+            pid, reward, done = env.step(int(action.item()))
+            for key, item in (("states", state), ("masks", mask), ("actions", action),
+                              ("values", value), ("logprobs", logprob)):
+                snapshots[key].append(item.detach().clone())
+            snapshots["rewards"].append(reward)
+            snapshots["terminals"].append(done)
+            feedback.append((env.user, pid, reward))
+        if not feedback:
+            raise ValueError("Cannot update PPO with an empty episode")
+        device = env.state.candidates.device
+        rollout = Rollout(
+            states=torch.stack(snapshots["states"]),
+            candidates=env.state.candidates.detach().clone(),
+            masks=torch.stack(snapshots["masks"]),
+            actions=torch.stack(snapshots["actions"]),
+            old_logprobs=torch.stack(snapshots["logprobs"]),
+            old_values=torch.stack(snapshots["values"]),
+            rewards=torch.tensor(snapshots["rewards"], dtype=torch.float32, device=device),
+            terminals=torch.tensor(snapshots["terminals"], dtype=torch.bool, device=device),
+            residual_weight=weight,
+        )
+        return rollout, feedback
+
+    def state_dict(self) -> dict:
+        """Training state; the inference artifact exports only the Actor weights."""
+        return {"policy": self.policy.state_dict(), "optimizer": self.optimizer.state_dict()}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.policy.load_state_dict(state["policy"])
+        self.optimizer.load_state_dict(state["optimizer"])
